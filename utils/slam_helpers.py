@@ -103,39 +103,85 @@ def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
     ].reshape(batch_dim + (4,))
 
 
-def params2rendervar(params):
+def _compute_opacities(params, config=None, tracking=False):
+
+    opacities_raw = torch.sigmoid(params['logit_opacities'])
+    opacities = opacities_raw
+
+    # Global spiking gate: one shared threshold for all gaussians.
+    if config is not None and config.get('use_spiking', False) and not tracking and 'Vth_opa' in params:
+        opacities = SpikingNeuron.apply(opacities, params['Vth_opa'])
+
+    # Local spiking gate: per-gaussian threshold (Vth_pdf).
+    # This is the first-stage local gating implementation on the Python path.
+    if config is not None and config.get('use_spike_prune', False) and not tracking and 'Vth_pdf' in params:
+        opacities = SpikingNeuron.apply(opacities, torch.abs(params['Vth_pdf']))
+
+    return opacities
+
+
+def params2rendervar(params, config=None, tracking=False):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
     # Initialize Render Variables
+    # rendervar = {
+    #     'means3D': params['means3D'],
+    #     'colors_precomp': params['rgb_colors'],
+    #     'rotations': F.normalize(params['unnorm_rotations']),
+    #     'opacities': torch.sigmoid(params['logit_opacities']),
+    #     'scales': torch.exp(log_scales),
+    #     'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+    # 
+    
+    # compute gated opacities (takes into account spiking option)
+    opacities = _compute_opacities(params, config, tracking)
+
     rendervar = {
         'means3D': params['means3D'],
         'colors_precomp': params['rgb_colors'],
         'rotations': F.normalize(params['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': opacities, # 使用门控后的不透明度
         'scales': torch.exp(log_scales),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(params['means3D'], requires_grad=True,device="cuda") + 0,
     }
+    if config is not None and config.get('use_spike_prune', False):
+        rendervar['v_th'] = torch.abs(params['Vth_pdf'])
+
     return rendervar
 
 
-def transformed_params2rendervar(params, transformed_gaussians):
+def transformed_params2rendervar(params, transformed_gaussians, config=None, tracking=False):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
     # Initialize Render Variables
+    # rendervar = {
+    #     'means3D': transformed_gaussians['means3D'], #
+    #     'colors_precomp': params['rgb_colors'],
+    #     'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
+    #     'opacities': torch.sigmoid(params['logit_opacities']),
+    #     'scales': torch.exp(log_scales),
+    #     'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+    # }
+
+    opacities = _compute_opacities(params, config, tracking)
+
     rendervar = {
-        'means3D': transformed_gaussians['means3D'],
+        'means3D': params['means3D'],
         'colors_precomp': params['rgb_colors'],
         'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': opacities, # 使用门控后的不透明度
         'scales': torch.exp(log_scales),
-        'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
+        'means2D': torch.zeros_like(params['means3D'], requires_grad=True,device="cuda") + 0,
     }
+    if config is not None and config.get('use_spike_prune', False):
+        rendervar['v_th'] = torch.abs(params['Vth_pdf'])
+
     return rendervar
 
 
@@ -213,39 +259,49 @@ def get_depth_and_silhouette(pts_3D, w2c):
     return depth_silhouette
 
 
-def params2depthplussilhouette(params, w2c):
+def params2depthplussilhouette(params, w2c, config=None, tracking=False):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
-    # Initialize Render Variables
+
+    opacities = _compute_opacities(params, config, tracking)
+
     rendervar = {
         'means3D': params['means3D'],
         'colors_precomp': get_depth_and_silhouette(params['means3D'], w2c),
         'rotations': F.normalize(params['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': opacities,
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
+    if config is not None and config.get('use_spike_prune', False):
+        rendervar['v_th'] = torch.abs(params['Vth_pdf'])
+
     return rendervar
 
 
-def transformed_params2depthplussilhouette(params, w2c, transformed_gaussians):
+def transformed_params2depthplussilhouette(params, w2c, transformed_gaussians, config=None, tracking=False):
     # Check if Gaussians are Isotropic
     if params['log_scales'].shape[1] == 1:
         log_scales = torch.tile(params['log_scales'], (1, 3))
     else:
         log_scales = params['log_scales']
-    # Initialize Render Variables
+
+    opacities = _compute_opacities(params, config, tracking)
+
     rendervar = {
         'means3D': transformed_gaussians['means3D'],
         'colors_precomp': get_depth_and_silhouette(transformed_gaussians['means3D'], w2c),
         'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
+        'opacities': opacities,
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
+    if config is not None and config.get('use_spike_prune', False):
+        rendervar['v_th'] = torch.abs(params['Vth_pdf'])
+
     return rendervar
 
 
@@ -263,6 +319,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
         transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
     """
     # Get Frame Camera Pose
+    # 读位姿
     if camera_grad:
         cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx])
         cam_tran = params['cam_trans'][..., time_idx]
@@ -280,6 +337,7 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
         transform_rots = True # Anisotropic Gaussians
     
     # Get Centers and Unnorm Rots of Gaussians in World Frame
+    #读出世界坐标系的点
     if gaussians_grad:
         pts = params['means3D']
         unnorm_rots = params['unnorm_rotations']
@@ -301,4 +359,37 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     else:
         transformed_gaussians['unnorm_rotations'] = unnorm_rots
 
-    return transformed_gaussians
+    return transformed_gaussians # 转换成相机坐标
+
+# 脉冲神经元,实现脉冲激活函数和自定义梯度
+class SpikingNeuron(torch.autograd.Function):
+
+    @staticmethod
+    # 前向传播,实现脉冲激活函数
+    def forward(ctx, input, thresh):
+        # 计算脉冲输出：如果输入大于等于阈值则为1，否则为0
+        out = (input >= thresh).float()
+        # 保存反向传播所需的张量
+        ctx.save_for_backward(input, out, thresh)
+        # 返回脉冲输出乘以输入（门控机制）
+        return out*input
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # 获取前向传播保存的张量
+        input, out, thresh = ctx.saved_tensors
+        # 克隆输出梯度作为输入梯度的基础
+        grad_input = grad_output.clone()
+
+        # 计算输入梯度：输出梯度乘以脉冲输出（门控）
+        grad = grad_input * out
+        # 设置学习率乘数
+        lm = 10.0
+        # 设置平滑参数
+        k = 0.1
+        # 计算阈值梯度：使用平滑的梯度近似
+        grad_Vth = -lm * input * grad_input * ((k - torch.abs(input - thresh)) / k ** 2).clamp(min = 0)
+        # 注释掉的调试代码：打印阈值梯度的总和
+        #print(torch.sum(grad_Vth.detach()))
+        # 返回输入梯度和阈值梯度
+        return grad, grad_Vth

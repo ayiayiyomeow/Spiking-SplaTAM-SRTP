@@ -138,20 +138,39 @@ def cat_params_to_optimizer(new_params, params, optimizer):
 
 def remove_points(to_remove, params, variables, optimizer):
     to_keep = ~to_remove
+    try:
+        mask_len = int(to_keep.shape[0])
+    except Exception:
+        mask_len = None
+
     keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']]
     for k in keys:
         group = [g for g in optimizer.param_groups if g['name'] == k][0]
         stored_state = optimizer.state.get(group['params'][0], None)
-        if stored_state is not None:
-            stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
-            stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][to_keep]
-            del optimizer.state[group['params'][0]]
-            group["params"][0] = torch.nn.Parameter((group["params"][0][to_keep].requires_grad_(True)))
-            optimizer.state[group['params'][0]] = stored_state
-            params[k] = group["params"][0]
+        p = group['params'][0]
+
+        try:
+            p_first = int(p.shape[0])
+        except Exception:
+            p_first = None
+
+        # Only per-gaussian tensors should be boolean-indexed by prune mask.
+        if (p_first is not None) and (mask_len == p_first):
+            if stored_state is not None:
+                stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][to_keep]
+                # reassign param and restore optimizer state
+                del optimizer.state[group['params'][0]]
+                group["params"][0] = torch.nn.Parameter(p[to_keep].requires_grad_(True))
+                optimizer.state[group['params'][0]] = stored_state
+                params[k] = group["params"][0]
+            else:
+                group["params"][0] = torch.nn.Parameter(p[to_keep].requires_grad_(True))
+                params[k] = group["params"][0]
         else:
-            group["params"][0] = torch.nn.Parameter(group["params"][0][to_keep].requires_grad_(True))
-            params[k] = group["params"][0]
+            # Keep non per-gaussian params unchanged, e.g. global thresholds.
+            params[k] = p
+    # Update variables (these are per-gaussian and must be indexed)
     variables['means2D_gradient_accum'] = variables['means2D_gradient_accum'][to_keep]
     variables['denom'] = variables['denom'][to_keep]
     variables['max_2D_radius'] = variables['max_2D_radius'][to_keep]
@@ -185,6 +204,81 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
             new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
             params = update_params_and_optimizer(new_params, params, optimizer)
     
+    return params, variables
+
+
+def spike_prune_gaussians(params, variables, optimizer, iter, prune_dict):
+    # prune only in configured iteration window and cadence
+    start_after = prune_dict.get('start_after', 0)
+    stop_after = prune_dict.get('stop_after', 0)
+    prune_every = prune_dict.get('prune_every', 1)
+    if not (start_after <= iter <= stop_after):
+        return params, variables
+    if iter % prune_every != 0:
+        return params, variables
+
+    #剪枝核心逻辑
+    opacities_raw = torch.sigmoid(params['logit_opacities'])
+    SpikingNeuron = None
+    try:
+        from utils.slam_helpers import SpikingNeuron as _SpikingNeuron
+        SpikingNeuron = _SpikingNeuron
+    except ImportError:
+        SpikingNeuron = None
+    if 'Vth_opa' in params:
+        if SpikingNeuron is not None:
+            opacities = SpikingNeuron.apply(opacities_raw, params['Vth_opa'])
+        else:
+            opacities = opacities_raw
+    else:
+        opacities = opacities_raw
+
+    # 剪枝条件
+    spike_min_opacity = prune_dict.get('spike_min_opacity', 1e-3)
+    opacity_mask = opacities.squeeze() < spike_min_opacity
+
+    # optional local threshold pruning
+    if 'Vth_pdf' in params:
+        spike_pdf_thresh = prune_dict.get('spike_pdf_thresh', 1.5)
+        pdf_mask = params['Vth_pdf'].squeeze() > spike_pdf_thresh
+    else:
+        pdf_mask = torch.zeros_like(opacity_mask, dtype=torch.bool)
+
+    prune_mask = torch.logical_or(opacity_mask, pdf_mask)
+
+    # 限制单次删除比例
+    current_num = params['means3D'].shape[0]
+    if current_num == 0:
+        variables['last_spike_pruned'] = 0
+        return params, variables
+
+    num_to_remove = int(prune_mask.sum().item())
+    max_remove_ratio = prune_dict.get('max_spike_remove_ratio', 0.3)
+    remove_ratio = num_to_remove / float(current_num)
+
+    # cap per-iteration removal ratio to avoid collapse
+    if remove_ratio > max_remove_ratio:
+        sorted_indices = torch.argsort(opacities.squeeze()) # 不透明度从低到高排序,优先删不透明度低的
+        num_to_keep = int(current_num * (1.0 - max_remove_ratio))
+        nremove = current_num - num_to_keep
+
+        new_prune_mask = torch.zeros_like(prune_mask, dtype=torch.bool, device=prune_mask.device)
+        if nremove > 0:
+            remove_idx = sorted_indices[:nremove]
+            new_prune_mask[remove_idx] = True
+
+        prune_mask = new_prune_mask
+        num_to_remove = int(prune_mask.sum().item())
+
+    # 执行剪枝
+    if num_to_remove > 0:
+        params, variables = remove_points(prune_mask, params, variables, optimizer)
+        print(f"Spike pruning: removed {num_to_remove} points, remaining {params['means3D'].shape[0]}")
+        variables['last_spike_pruned'] = num_to_remove
+    else:
+        variables['last_spike_pruned'] = 0
+
+    torch.cuda.empty_cache()
     return params, variables
 
 

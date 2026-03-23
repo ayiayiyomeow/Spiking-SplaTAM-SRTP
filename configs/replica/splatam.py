@@ -7,7 +7,7 @@ scenes = ["room0", "room1", "room2",
 
 primary_device="cuda:0"
 seed = 0
-scene_name = scenes[0]
+scene_name = scenes[2]
 
 map_every = 1
 keyframe_every = 5
@@ -36,7 +36,8 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_wandb=True,
+    use_spike_prune=True, # Enable spike-based pruning during mapping
+    use_wandb=False,
     wandb=dict(
         entity="theairlab",
         project="SplaTAM",
@@ -52,7 +53,7 @@ config = dict(
         desired_image_height=680,
         desired_image_width=1200,
         start=0,
-        end=-1,
+        end=100,
         stride=1,
         num_frames=-1,
     ),
@@ -100,10 +101,14 @@ config = dict(
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
         pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
+            use_spike_prune=True, # Alternative switch for spike pruning
             start_after=0,
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
+            spike_min_opacity=1e-3,
+            spike_pdf_thresh=1.5,
+            max_spike_remove_ratio=0.3,
             removal_opacity_threshold=0.005,
             final_removal_opacity_threshold=0.005,
             reset_opacities=False,

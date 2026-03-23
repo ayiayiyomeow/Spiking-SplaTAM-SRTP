@@ -32,7 +32,7 @@ from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
     transform_to_frame, l1_loss_v1, matrix_to_quaternion
 )
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
+from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, spike_prune_gaussians, densify
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
@@ -855,7 +855,18 @@ def rgbd_slam(config: dict):
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        use_spike_prune = (
+                            config.get('use_spike_prune', False)
+                            or config['mapping']['pruning_dict'].get('use_spike_prune', False)
+                        )
+                        if use_spike_prune:
+                            params, variables = spike_prune_gaussians(
+                                params, variables, optimizer, iter, config['mapping']['pruning_dict']
+                            )
+                        else:
+                            params, variables = prune_gaussians(
+                                params, variables, optimizer, iter, config['mapping']['pruning_dict']
+                            )
                         if config['use_wandb']:
                             wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
                                            "Mapping/step": wandb_mapping_step})
