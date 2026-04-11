@@ -196,6 +196,8 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
             if iter >= prune_dict['remove_big_after']:
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
+            if int(to_remove.sum().item())>0:
+                print(f"Pruning: removed {int(to_remove.sum().item())} points, remaining {params['means3D'].shape[0]}")
             params, variables = remove_points(to_remove, params, variables, optimizer)
             torch.cuda.empty_cache()
         
@@ -226,8 +228,10 @@ def spike_prune_gaussians(params, variables, optimizer, iter, prune_dict):
     except ImportError:
         SpikingNeuron = None
     if 'Vth_opa' in params:
+        
         if SpikingNeuron is not None:
             opacities = SpikingNeuron.apply(opacities_raw, params['Vth_opa'])
+            
         else:
             opacities = opacities_raw
     else:
@@ -238,7 +242,8 @@ def spike_prune_gaussians(params, variables, optimizer, iter, prune_dict):
     opacity_mask = opacities.squeeze() < spike_min_opacity
 
     # optional local threshold pruning
-    if 'Vth_pdf' in params:
+    if False:#'Vth_pdf' in params:
+        
         spike_pdf_thresh = prune_dict.get('spike_pdf_thresh', 1.5)
         pdf_mask = params['Vth_pdf'].squeeze() > spike_pdf_thresh
     else:
@@ -273,7 +278,7 @@ def spike_prune_gaussians(params, variables, optimizer, iter, prune_dict):
     # 执行剪枝
     if num_to_remove > 0:
         params, variables = remove_points(prune_mask, params, variables, optimizer)
-        print(f"Spike pruning: removed {num_to_remove} points, remaining {params['means3D'].shape[0]}")
+        print(f"Spike pruning: removed {num_to_remove} points, remaining {params['means3D'].shape[0]}, the threshold is {params['Vth_opa']}")
         variables['last_spike_pruned'] = num_to_remove
     else:
         variables['last_spike_pruned'] = 0

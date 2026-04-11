@@ -109,7 +109,13 @@ def _compute_opacities(params, config=None, tracking=False):
     opacities = opacities_raw
 
     # Global spiking gate: one shared threshold for all gaussians.
-    if config is not None and config.get('use_spiking', False) and not tracking and 'Vth_opa' in params:
+    # Enable in mapping either by use_spiking or by spike-prune switch.
+    if (
+        config is not None
+        and (config.get('use_spiking', False) or config.get('use_spike_prune', False))
+        and not tracking
+        and 'Vth_opa' in params
+    ):
         opacities = SpikingNeuron.apply(opacities, params['Vth_opa'])
 
     # Local spiking gate: per-gaussian threshold (Vth_pdf).
@@ -147,7 +153,11 @@ def params2rendervar(params, config=None, tracking=False):
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True,device="cuda") + 0,
     }
-    if config is not None and config.get('use_spike_prune', False):
+    if (
+        config is not None
+        and config.get('use_spike_prune', False)
+        and 'Vth_pdf' in params
+    ):
         rendervar['v_th'] = torch.abs(params['Vth_pdf'])
 
     return rendervar
@@ -172,14 +182,18 @@ def transformed_params2rendervar(params, transformed_gaussians, config=None, tra
     opacities = _compute_opacities(params, config, tracking)
 
     rendervar = {
-        'means3D': params['means3D'],
+        'means3D': transformed_gaussians['means3D'],
         'colors_precomp': params['rgb_colors'],
         'rotations': F.normalize(transformed_gaussians['unnorm_rotations']),
         'opacities': opacities, # 使用门控后的不透明度
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True,device="cuda") + 0,
     }
-    if config is not None and config.get('use_spike_prune', False):
+    if (
+        config is not None
+        and config.get('use_spike_prune', False)
+        and 'Vth_pdf' in params
+    ):
         rendervar['v_th'] = torch.abs(params['Vth_pdf'])
 
     return rendervar
@@ -276,7 +290,11 @@ def params2depthplussilhouette(params, w2c, config=None, tracking=False):
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
-    if config is not None and config.get('use_spike_prune', False):
+    if (
+        config is not None
+        and config.get('use_spike_prune', False)
+        and 'Vth_pdf' in params
+    ):
         rendervar['v_th'] = torch.abs(params['Vth_pdf'])
 
     return rendervar
@@ -299,7 +317,11 @@ def transformed_params2depthplussilhouette(params, w2c, transformed_gaussians, c
         'scales': torch.exp(log_scales),
         'means2D': torch.zeros_like(params['means3D'], requires_grad=True, device="cuda") + 0
     }
-    if config is not None and config.get('use_spike_prune', False):
+    if (
+        config is not None
+        and config.get('use_spike_prune', False)
+        and 'Vth_pdf' in params
+    ):
         rendervar['v_th'] = torch.abs(params['Vth_pdf'])
 
     return rendervar

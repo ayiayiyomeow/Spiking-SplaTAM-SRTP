@@ -30,7 +30,7 @@ from utils.keyframe_selection import keyframe_selection_overlap
 from utils.recon_helpers import setup_camera
 from utils.slam_helpers import (
     transformed_params2rendervar, transformed_params2depthplussilhouette,
-    transform_to_frame, l1_loss_v1, matrix_to_quaternion
+    transform_to_frame, l1_loss_v1, matrix_to_quaternion, SpikingNeuron
 )
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, spike_prune_gaussians, densify
 
@@ -117,7 +117,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld
 
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution, vth_opa_init=0.5):
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
@@ -134,6 +134,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
         'unnorm_rotations': unnorm_rots,
         'logit_opacities': logit_opacities,
         'log_scales': log_scales,
+        # Global learnable threshold for spiking opacity gating.
+        'Vth_opa': torch.full((1, 1), float(vth_opa_init), dtype=torch.float, device="cuda"),
     }
 
     # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
@@ -159,7 +161,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
 
 def initialize_optimizer(params, lrs_dict, tracking):
     lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
+    param_groups = [{'params': [v], 'name': k, 'lr': lrs.get(k, 0.0)} for k, v in params.items()]
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
@@ -167,7 +169,7 @@ def initialize_optimizer(params, lrs_dict, tracking):
 
 
 def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
-                              mean_sq_dist_method, densify_dataset=None, gaussian_distribution=None):
+                              mean_sq_dist_method, densify_dataset=None, gaussian_distribution=None, vth_opa_init=0.5):
     # Get RGB-D Data & Camera Parameters
     color, depth, intrinsics, pose = dataset[0]
 
@@ -200,7 +202,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
                                                 mean_sq_dist_method=mean_sq_dist_method)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution)
+    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution, vth_opa_init=vth_opa_init)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting Densification
     variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio
@@ -213,7 +215,8 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 
 def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None,
+             config=None):
     # Initialize Loss Dictionary
     losses = {}
 
@@ -240,9 +243,9 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
                                              camera_grad=False)
 
     # Initialize Render Variables
-    rendervar = transformed_params2rendervar(params, transformed_gaussians)
+    rendervar = transformed_params2rendervar(params, transformed_gaussians, config=config, tracking=tracking)
     depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_gaussians)
+                                                                 transformed_gaussians, config=config, tracking=tracking)
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
@@ -556,13 +559,15 @@ def rgbd_slam(config: dict):
                                                                         config['scene_radius_depth_ratio'],
                                                                         config['mean_sq_dist_method'],
                                                                         densify_dataset=densify_dataset,
-                                                                        gaussian_distribution=config['gaussian_distribution'])                                                                                                                  
+                                                                        gaussian_distribution=config['gaussian_distribution'],
+                                                                        vth_opa_init=config['mapping']['pruning_dict'].get('init_vth_opa', 0.5))                                                                                                                  
     else:
         # Initialize Parameters & Canoncial Camera parameters
         params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(dataset, num_frames, 
                                                                                         config['scene_radius_depth_ratio'],
                                                                                         config['mean_sq_dist_method'],
-                                                                                        gaussian_distribution=config['gaussian_distribution'])
+                                                                                        gaussian_distribution=config['gaussian_distribution'],
+                                                                                        vth_opa_init=config['mapping']['pruning_dict'].get('init_vth_opa', 0.5))
     
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
@@ -694,7 +699,7 @@ def rgbd_slam(config: dict):
                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
+                                                   tracking_iteration=iter, config=config)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
@@ -846,7 +851,8 @@ def rgbd_slam(config: dict):
                 # Loss for current frame
                 loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
                                                 config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True,
+                                                config=config)
                 if config['use_wandb']:
                     # Report Loss
                     wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
@@ -855,10 +861,7 @@ def rgbd_slam(config: dict):
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
-                        use_spike_prune = (
-                            config.get('use_spike_prune', False)
-                            or config['mapping']['pruning_dict'].get('use_spike_prune', False)
-                        )
+                        use_spike_prune = bool(config.get('use_spike_prune', False))
                         if use_spike_prune:
                             params, variables = spike_prune_gaussians(
                                 params, variables, optimizer, iter, config['mapping']['pruning_dict']
@@ -980,6 +983,13 @@ def rgbd_slam(config: dict):
             eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
                  mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
+
+    num_gaussians_final = int(params['means3D'].shape[0])
+    print(f"\n最终高斯核数量 (means3D 行数): {num_gaussians_final}")
+    gauss_count_path = os.path.join(output_dir, "gaussian_count.txt")
+    with open(gauss_count_path, "w", encoding="utf-8") as f:
+        f.write(f"{num_gaussians_final}\n")
+    print(f"已写入: {gauss_count_path}")
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

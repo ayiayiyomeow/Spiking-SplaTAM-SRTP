@@ -15,7 +15,7 @@ mapping_window_size = 24
 tracking_iters = 40
 mapping_iters = 60
 
-group_name = "Replica"
+group_name = "Replica_ly2"
 run_name = f"{scene_name}_{seed}"
 
 config = dict(
@@ -36,7 +36,7 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_spike_prune=False, # Enable spike-based pruning during mapping
+    use_spike_prune=True, # Enable spike-based pruning during mapping
     use_wandb=False,
     wandb=dict(
         entity="theairlab",
@@ -53,7 +53,7 @@ config = dict(
         desired_image_height=680,
         desired_image_width=1200,
         start=0,
-        end=1000,
+        end=30,
         stride=1,
         num_frames=-1,
     ),
